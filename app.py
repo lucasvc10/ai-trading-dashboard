@@ -1616,6 +1616,219 @@ if st.session_state.journal:
     trades_df = pd.DataFrame(display_trades)
     st.dataframe(trades_df, use_container_width=True, hide_index=True)
     
+    # ========================================================================
+    # JOURNAL PATTERN ANALYSIS
+    # ========================================================================
+    # Analyze trade patterns to help identify what works best for this trader.
+    # Uses only closed trades (trades with exit price) for P&L and win rate.
+    # Shows breakdowns by setup type, trade type, direction, and confidence.
+    # ========================================================================
+    
+    def analyze_patterns_by_setup(journal_entries):
+        """
+        Analyze P/L and win rate broken down by setup type.
+        Returns a DataFrame with: Setup, Total P&L, Win Rate, # Trades
+        Only uses closed trades (exit_price > 0).
+        """
+        closed_trades = [t for t in journal_entries if t.get('exit_price') and t['exit_price'] > 0]
+        
+        if not closed_trades:
+            return None
+        
+        # Group by setup type
+        setup_groups = {}
+        for trade in closed_trades:
+            setup = trade.get('setup_type', 'Unknown')
+            if setup.strip():  # Skip empty setup types
+                if setup not in setup_groups:
+                    setup_groups[setup] = []
+                setup_groups[setup].append(trade)
+        
+        results = []
+        for setup, trades in setup_groups.items():
+            total_pnl = sum(t.get('pnl', 0) for t in trades)
+            winning = len([t for t in trades if t.get('pnl', 0) > 0])
+            win_rate = (winning / len(trades)) * 100
+            results.append({
+                "Setup Type": setup,
+                "P&L": total_pnl,
+                "Win Rate": win_rate,
+                "# Trades": len(trades)
+            })
+        
+        return pd.DataFrame(results).sort_values('P&L', ascending=False)
+    
+    def analyze_patterns_by_trade_type(journal_entries):
+        """
+        Analyze win rate broken down by trade type (Stock, Option, Futures).
+        Returns a DataFrame with: Trade Type, Win Rate, # Closed Trades
+        Only uses closed trades.
+        """
+        closed_trades = [t for t in journal_entries if t.get('exit_price') and t['exit_price'] > 0]
+        
+        if not closed_trades:
+            return None
+        
+        # Group by trade type
+        type_groups = {}
+        for trade in closed_trades:
+            trade_type = trade.get('trade_type', 'Unknown')
+            if trade_type not in type_groups:
+                type_groups[trade_type] = []
+            type_groups[trade_type].append(trade)
+        
+        results = []
+        for trade_type, trades in type_groups.items():
+            winning = len([t for t in trades if t.get('pnl', 0) > 0])
+            win_rate = (winning / len(trades)) * 100
+            results.append({
+                "Trade Type": trade_type,
+                "Win Rate": win_rate,
+                "# Trades": len(trades)
+            })
+        
+        return pd.DataFrame(results).sort_values('Win Rate', ascending=False)
+    
+    def analyze_patterns_by_direction(journal_entries):
+        """
+        Analyze performance of Long vs Short trades.
+        Returns a DataFrame with: Direction, Avg P&L, Win Rate, # Trades
+        Only uses closed trades.
+        """
+        closed_trades = [t for t in journal_entries if t.get('exit_price') and t['exit_price'] > 0]
+        
+        if not closed_trades:
+            return None
+        
+        # Group by direction (Long/Short)
+        direction_groups = {}
+        for trade in closed_trades:
+            direction = trade.get('direction', 'Unknown')
+            if direction not in direction_groups:
+                direction_groups[direction] = []
+            direction_groups[direction].append(trade)
+        
+        results = []
+        for direction, trades in direction_groups.items():
+            total_pnl = sum(t.get('pnl', 0) for t in trades)
+            avg_pnl = total_pnl / len(trades)
+            winning = len([t for t in trades if t.get('pnl', 0) > 0])
+            win_rate = (winning / len(trades)) * 100
+            results.append({
+                "Direction": direction,
+                "Avg P&L": avg_pnl,
+                "Win Rate": win_rate,
+                "# Trades": len(trades)
+            })
+        
+        return pd.DataFrame(results).sort_values('Avg P&L', ascending=False)
+    
+    def analyze_avg_confidence_by_setup(journal_entries):
+        """
+        Calculate average confidence level for each setup type.
+        Returns a DataFrame with: Setup Type, Avg Confidence, # Trades
+        Uses all trades (open and closed) since confidence is recorded at entry.
+        """
+        # Use all trades, not just closed ones (confidence is about entry confidence)
+        if not journal_entries:
+            return None
+        
+        # Group by setup type
+        setup_groups = {}
+        for trade in journal_entries:
+            setup = trade.get('setup_type', 'Unknown')
+            if setup.strip():  # Skip empty setup types
+                if setup not in setup_groups:
+                    setup_groups[setup] = []
+                setup_groups[setup].append(trade)
+        
+        results = []
+        for setup, trades in setup_groups.items():
+            avg_conf = sum(t.get('confidence', 5) for t in trades) / len(trades)
+            results.append({
+                "Setup Type": setup,
+                "Avg Confidence": avg_conf,
+                "# Trades": len(trades)
+            })
+        
+        return pd.DataFrame(results).sort_values('Avg Confidence', ascending=False)
+    
+    # Display pattern analysis only if there are closed trades
+    closed_trades_for_analysis = [t for t in st.session_state.journal if t.get('exit_price') and t['exit_price'] > 0]
+    
+    if closed_trades_for_analysis:
+        st.divider()
+        st.subheader("🧠 Journal Pattern Analysis")
+        st.markdown("*Identify what works best by analyzing your closed trades*")
+        
+        # Row 1: P/L by Setup Type and Trade Type Win Rate
+        pattern_col1, pattern_col2 = st.columns(2)
+        
+        with pattern_col1:
+            st.markdown("**📊 P&L by Setup Type**")
+            setup_analysis = analyze_patterns_by_setup(st.session_state.journal)
+            if setup_analysis is not None and not setup_analysis.empty:
+                # Format for display
+                display_setup = setup_analysis.copy()
+                display_setup['P&L'] = display_setup['P&L'].apply(lambda x: f"${x:.2f}")
+                display_setup['Win Rate'] = display_setup['Win Rate'].apply(lambda x: f"{x:.1f}%")
+                st.dataframe(
+                    display_setup[['Setup Type', 'P&L', 'Win Rate', '# Trades']],
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.info("💡 No closed trades yet to analyze by setup.")
+        
+        with pattern_col2:
+            st.markdown("**📈 Win Rate by Trade Type**")
+            type_analysis = analyze_patterns_by_trade_type(st.session_state.journal)
+            if type_analysis is not None and not type_analysis.empty:
+                # Format for display
+                display_type = type_analysis.copy()
+                display_type['Win Rate'] = display_type['Win Rate'].apply(lambda x: f"{x:.1f}%")
+                st.dataframe(
+                    display_type[['Trade Type', 'Win Rate', '# Trades']],
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.info("💡 No closed trades yet to analyze by type.")
+        
+        # Row 2: Long vs Short Performance and Avg Confidence by Setup
+        pattern_col3, pattern_col4 = st.columns(2)
+        
+        with pattern_col3:
+            st.markdown("**⚔️ Long vs Short Performance**")
+            direction_analysis = analyze_patterns_by_direction(st.session_state.journal)
+            if direction_analysis is not None and not direction_analysis.empty:
+                # Format for display
+                display_direction = direction_analysis.copy()
+                display_direction['Avg P&L'] = display_direction['Avg P&L'].apply(lambda x: f"${x:.2f}")
+                display_direction['Win Rate'] = display_direction['Win Rate'].apply(lambda x: f"{x:.1f}%")
+                st.dataframe(
+                    display_direction[['Direction', 'Avg P&L', 'Win Rate', '# Trades']],
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.info("💡 No closed trades yet to compare Long vs Short.")
+        
+        with pattern_col4:
+            st.markdown("**💪 Avg Confidence by Setup**")
+            confidence_analysis = analyze_avg_confidence_by_setup(st.session_state.journal)
+            if confidence_analysis is not None and not confidence_analysis.empty:
+                # Format for display
+                display_conf = confidence_analysis.copy()
+                display_conf['Avg Confidence'] = display_conf['Avg Confidence'].apply(lambda x: f"{x:.1f}/10")
+                st.dataframe(
+                    display_conf[['Setup Type', 'Avg Confidence', '# Trades']],
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.info("💡 No trades yet to analyze confidence levels.")
+    
     # Option to clear entire journal
     if st.checkbox("Clear all trades?"):
         if st.button("🗑️ Delete Journal", use_container_width=True):
