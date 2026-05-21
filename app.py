@@ -1,0 +1,1015 @@
+import streamlit as st
+import yfinance as yf
+import plotly.graph_objects as go
+import pandas as pd
+from datetime import datetime, timedelta
+
+import json
+import os
+
+PORTFOLIO_FILE = "portfolio.json"
+WATCHLIST_FILE = "watchlist.json"
+
+def load_portfolio():
+    # Ensure the portfolio file exists before trying to read it.
+    # If the file is missing, create it with an empty portfolio.
+    if not os.path.exists(PORTFOLIO_FILE):
+        save_portfolio([])
+        return []
+
+    try:
+        with open(PORTFOLIO_FILE, "r") as file:
+            return json.load(file)
+    except (json.JSONDecodeError, FileNotFoundError):
+        # If the file is corrupted or can't be read, reset it safely.
+        save_portfolio([])
+        return []
+
+
+def save_portfolio(portfolio):
+    # Write the portfolio to disk so holdings persist across refreshes.
+    with open(PORTFOLIO_FILE, "w") as file:
+        json.dump(portfolio, file, indent=4)
+
+
+def load_watchlist():
+    # Ensure the watchlist file exists before trying to read it.
+    # If the file is missing, create it with an empty watchlist.
+    if not os.path.exists(WATCHLIST_FILE):
+        save_watchlist([])
+        return []
+
+    try:
+        with open(WATCHLIST_FILE, "r") as file:
+            return json.load(file)
+    except (json.JSONDecodeError, FileNotFoundError):
+        save_watchlist([])
+        return []
+
+
+def save_watchlist(watchlist):
+    # Write the watchlist to disk so it persists across app restarts.
+    with open(WATCHLIST_FILE, "w") as file:
+        json.dump(watchlist, file, indent=4)
+
+# ============================================================================
+# PAGE CONFIGURATION
+# ============================================================================
+st.set_page_config(
+    page_title="Trading Dashboard",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# Initialize saved state for portfolio and watchlist when app starts.
+if "portfolio" not in st.session_state:
+    st.session_state.portfolio = load_portfolio()
+if "watchlist" not in st.session_state:
+    st.session_state.watchlist = load_watchlist()
+if "ticker" not in st.session_state:
+    st.session_state.ticker = "AAPL"
+if "ticker_input" not in st.session_state:
+    st.session_state.ticker_input = st.session_state.ticker
+
+# Helper callback to update both ticker values from a watchlist click.
+def select_watchlist_ticker(watch_ticker):
+    st.session_state.ticker = watch_ticker
+    st.session_state.ticker_input = watch_ticker
+
+# Dark professional finance theme
+st.markdown("""
+<style>
+    [data-testid="stAppViewContainer"] {
+        background: linear-gradient(135deg, #0f1419 0%, #1a1f2e 100%);
+    }
+    [data-testid="stSidebar"] {
+        background: linear-gradient(135deg, #0a0e14 0%, #151b28 100%);
+    }
+    .metric-card {
+        background: #1e2738;
+        padding: 20px;
+        border-radius: 10px;
+        border-left: 4px solid #00d4ff;
+        margin-bottom: 10px;
+    }
+    .buy-signal {
+        color: #00ff41;
+        font-weight: bold;
+    }
+    .sell-signal {
+        color: #ff4444;
+        font-weight: bold;
+    }
+    .hold-signal {
+        color: #ffaa00;
+        font-weight: bold;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# ============================================================================
+# SIDEBAR - CONTROLS
+# ============================================================================
+with st.sidebar:
+    st.header("⚙️ Dashboard Controls")
+    st.divider()
+    
+    # Ticker input
+    ticker = st.text_input(
+        "Stock Ticker",
+        value=st.session_state.ticker_input,
+        placeholder="Enter ticker (e.g., AAPL, GOOGL, MSFT)",
+        help="Enter any valid stock ticker symbol",
+        key="ticker_input"
+    ).strip().upper()
+    
+    st.session_state.ticker = ticker
+    
+    # Period selection
+    period = st.selectbox(
+        "Select Time Period",
+        options=["1mo", "3mo", "6mo", "1y"],
+        index=0,
+        help="Choose the time range for analysis"
+    )
+
+    st.divider()
+    st.subheader("⭐ Watchlist")
+
+    # Add a ticker to the saved watchlist
+    new_watchlist_ticker = st.text_input(
+        "Add Watchlist Ticker",
+        placeholder="e.g., TSLA",
+        key="new_watchlist_ticker"
+    ).strip().upper()
+
+    if st.button("➕ Add to Watchlist", use_container_width=True):
+        if new_watchlist_ticker:
+            if new_watchlist_ticker in st.session_state.watchlist:
+                st.warning(f"{new_watchlist_ticker} is already in your watchlist.")
+            else:
+                st.session_state.watchlist.append(new_watchlist_ticker)
+                save_watchlist(st.session_state.watchlist)
+                st.success(f"✅ Added {new_watchlist_ticker} to watchlist.")
+                st.rerun()
+        else:
+            st.error("⚠️ Enter a ticker symbol to add.")
+
+    # Show saved tickers and allow quick selection or removal
+    if st.session_state.watchlist:
+        for watch_ticker in st.session_state.watchlist:
+            watch_col1, watch_col2 = st.columns([3, 1])
+            watch_col1.button(
+                watch_ticker,
+                key=f"watch_{watch_ticker}",
+                on_click=select_watchlist_ticker,
+                args=(watch_ticker,)
+            )
+            if watch_col2.button("Remove", key=f"remove_watch_{watch_ticker}"):
+                st.session_state.watchlist = [
+                    t for t in st.session_state.watchlist if t != watch_ticker
+                ]
+                save_watchlist(st.session_state.watchlist)
+                st.success(f"✅ Removed {watch_ticker} from watchlist.")
+                st.rerun()
+
+    st.divider()
+    st.subheader("📊 Technical Indicators")
+    
+    # Moving averages toggle
+    show_ma5 = st.checkbox("Show 5-Day MA", value=True)
+    show_ma10 = st.checkbox("Show 10-Day MA", value=True)
+    
+    # Signal markers
+    show_signals = st.checkbox("Show Buy/Sell Signals", value=True)
+    
+    st.divider()
+    st.info(
+        "💡 **How to use:**\n"
+        "- Enter a stock ticker\n"
+        "- Select your time period\n"
+        "- Toggle indicators on/off\n"
+        "- Hover over chart for details"
+    )
+
+# ============================================================================
+# MAIN DASHBOARD
+# ============================================================================
+st.title("📈 Professional Trading Dashboard")
+st.markdown(
+    f"Real-time stock analysis powered by yfinance | Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+)
+
+# Fetch data
+try:
+    with st.spinner(f"📥 Fetching data for {ticker}..."):
+        stock = yf.Ticker(ticker)
+        data = stock.history(period=period)
+        
+        if data.empty:
+            st.error(f"❌ No data found for ticker: {ticker}")
+            st.stop()
+        
+        # Calculate indicators
+        close_prices = data["Close"]
+        ma5 = close_prices.rolling(window=5).mean()
+        ma10 = close_prices.rolling(window=10).mean()
+        
+        # Generate signals
+        buy_signal = ma5 > ma10
+        sell_signal = ma5 < ma10
+        
+        # Current signal
+        if ma5.iloc[-1] > ma10.iloc[-1]:
+            signal = "BUY"
+            signal_color = "#00ff41"
+        elif ma5.iloc[-1] < ma10.iloc[-1]:
+            signal = "SELL"
+            signal_color = "#ff4444"
+        else:
+            signal = "HOLD"
+            signal_color = "#ffaa00"
+    
+except Exception as e:
+    st.error(f"❌ Error fetching data: {str(e)}")
+    st.stop()
+
+# ============================================================================
+# KEY METRICS
+# ============================================================================
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
+    current_price = close_prices.iloc[-1]
+    st.metric(
+        "Current Price",
+        f"${current_price:.2f}",
+        f"{(current_price - close_prices.iloc[-2]):.2f}",
+        delta_color="inverse"
+    )
+
+with col2:
+    price_change = ((close_prices.iloc[-1] - close_prices.iloc[0]) / close_prices.iloc[0]) * 100
+    st.metric(
+        "Period Change",
+        f"{price_change:.2f}%",
+        delta_color="inverse"
+    )
+
+with col3:
+    high_price = close_prices.max()
+    st.metric("Period High", f"${high_price:.2f}")
+
+with col4:
+    low_price = close_prices.min()
+    st.metric("Period Low", f"${low_price:.2f}")
+
+# Trading signal display
+st.divider()
+signal_html = f"""
+<div style='
+    background: linear-gradient(135deg, #1e2738, #2a3447);
+    padding: 25px;
+    border-radius: 10px;
+    border-left: 5px solid {signal_color};
+    text-align: center;
+'>
+    <h3 style='color: #ffffff; margin: 0;'>Current Trading Signal</h3>
+    <h1 style='color: {signal_color}; margin: 10px 0;'>{signal}</h1>
+    <p style='color: #b0b9c1; margin: 0;'>
+        5-Day MA: ${ma5.iloc[-1]:.2f} | 10-Day MA: ${ma10.iloc[-1]:.2f}
+    </p>
+</div>
+"""
+st.markdown(signal_html, unsafe_allow_html=True)
+
+# ============================================================================
+# INTERACTIVE CHART
+# ============================================================================
+st.subheader("📊 Price Chart with Technical Indicators")
+
+# Create interactive chart
+fig = go.Figure()
+
+# Close price line
+fig.add_trace(go.Scatter(
+    x=data.index,
+    y=close_prices,
+    name="Close Price",
+    line=dict(color="#00d4ff", width=2.5),
+    hovertemplate="<b>Date:</b> %{x|%Y-%m-%d}<br><b>Price:</b> $%{y:.2f}<extra></extra>"
+))
+
+# 5-Day MA
+if show_ma5:
+    fig.add_trace(go.Scatter(
+        x=data.index,
+        y=ma5,
+        name="5-Day MA",
+        line=dict(color="#00ff41", width=2, dash="dash"),
+        hovertemplate="<b>Date:</b> %{x|%Y-%m-%d}<br><b>MA5:</b> $%{y:.2f}<extra></extra>"
+    ))
+
+# 10-Day MA
+if show_ma10:
+    fig.add_trace(go.Scatter(
+        x=data.index,
+        y=ma10,
+        name="10-Day MA",
+        line=dict(color="#ff8800", width=2, dash="dash"),
+        hovertemplate="<b>Date:</b> %{x|%Y-%m-%d}<br><b>MA10:</b> $%{y:.2f}<extra></extra>"
+    ))
+
+# Buy signals
+if show_signals:
+    buy_points = data.index[buy_signal]
+    buy_prices = close_prices[buy_signal]
+    fig.add_trace(go.Scatter(
+        x=buy_points,
+        y=buy_prices,
+        mode="markers",
+        name="Buy Signal",
+        marker=dict(color="#00ff41", size=10, symbol="triangle-up"),
+        hovertemplate="<b>BUY Signal</b><br><b>Date:</b> %{x|%Y-%m-%d}<br><b>Price:</b> $%{y:.2f}<extra></extra>"
+    ))
+    
+    # Sell signals
+    sell_points = data.index[sell_signal]
+    sell_prices = close_prices[sell_signal]
+    fig.add_trace(go.Scatter(
+        x=sell_points,
+        y=sell_prices,
+        mode="markers",
+        name="Sell Signal",
+        marker=dict(color="#ff4444", size=10, symbol="triangle-down"),
+        hovertemplate="<b>SELL Signal</b><br><b>Date:</b> %{x|%Y-%m-%d}<br><b>Price:</b> $%{y:.2f}<extra></extra>"
+    ))
+
+# Update layout with dark theme
+fig.update_layout(
+    title=f"{ticker} Stock Price Analysis",
+    xaxis_title="Date",
+    yaxis_title="Price (USD)",
+    template="plotly_dark",
+    hovermode="x unified",
+    height=500,
+    paper_bgcolor="rgba(15, 20, 25, 0)",
+    plot_bgcolor="rgba(26, 31, 46, 0.5)",
+    font=dict(color="#ffffff", size=12),
+    xaxis=dict(
+        gridcolor="rgba(255, 255, 255, 0.1)",
+        zeroline=False,
+    ),
+    yaxis=dict(
+        gridcolor="rgba(255, 255, 255, 0.1)",
+        zeroline=False,
+    ),
+    legend=dict(
+        bgcolor="rgba(30, 39, 56, 0.8)",
+        bordercolor="#00d4ff",
+        borderwidth=1,
+    ),
+)
+
+st.plotly_chart(fig, use_container_width=True)
+
+# ============================================================================
+# RSI (RELATIVE STRENGTH INDEX) INDICATOR
+# ============================================================================
+st.subheader("📊 RSI (Relative Strength Index) Indicator")
+
+# Function to calculate RSI (Relative Strength Index)
+# RSI measures momentum by comparing upward and downward price movements
+# Range: 0-100 | Above 70 = Overbought (may sell) | Below 30 = Oversold (may buy)
+def calculate_rsi(prices, period=14):
+    """
+    Calculate Relative Strength Index (RSI)
+    
+    Parameters:
+    - prices: Series of price data
+    - period: Number of periods for RSI calculation (default 14)
+    
+    Returns:
+    - RSI values as a pandas Series
+    """
+    # Calculate price changes from day to day
+    price_changes = prices.diff()
+    
+    # Separate gains (positive changes) and losses (negative changes)
+    gains = price_changes.clip(lower=0)  # Keep only positive values
+    losses = -price_changes.clip(upper=0)  # Keep only negative values (as positive)
+    
+    # Calculate average gains and losses over the period
+    avg_gains = gains.rolling(window=period).mean()
+    avg_losses = losses.rolling(window=period).mean()
+    
+    # Calculate RS (Relative Strength) and RSI
+    rs = avg_gains / avg_losses
+    rsi = 100 - (100 / (1 + rs))
+    
+    return rsi
+
+# Calculate RSI with 14-day period (standard for technical analysis)
+rsi = calculate_rsi(close_prices, period=14)
+
+# Create RSI chart
+rsi_fig = go.Figure()
+
+# RSI line
+rsi_fig.add_trace(go.Scatter(
+    x=data.index,
+    y=rsi,
+    name="RSI (14)",
+    line=dict(color="#00d4ff", width=2.5),
+    hovertemplate="<b>Date:</b> %{x|%Y-%m-%d}<br><b>RSI:</b> %{y:.2f}<extra></extra>"
+))
+
+# Overbought zone (RSI > 70) - red background
+rsi_fig.add_hline(
+    y=70,
+    line_dash="dash",
+    line_color="#ff6b6b",
+    annotation_text="Overbought (70)",
+    annotation_position="right",
+)
+rsi_fig.add_hrect(y0=70, y1=100, fillcolor="rgba(255, 107, 107, 0.1)", layer="below", line_width=0)
+
+# Oversold zone (RSI < 30) - green background
+rsi_fig.add_hline(
+    y=30,
+    line_dash="dash",
+    line_color="#51cf66",
+    annotation_text="Oversold (30)",
+    annotation_position="right",
+)
+rsi_fig.add_hrect(y0=0, y1=30, fillcolor="rgba(81, 207, 102, 0.1)", layer="below", line_width=0)
+
+# Neutral zone (30-70)
+rsi_fig.add_hline(y=50, line_dash="dot", line_color="rgba(255, 255, 255, 0.2)", line_width=1)
+
+# Update RSI chart layout with dark theme
+rsi_fig.update_layout(
+    title=f"{ticker} RSI (14-Period) - Momentum Indicator",
+    xaxis_title="Date",
+    yaxis_title="RSI Value (0-100)",
+    template="plotly_dark",
+    hovermode="x unified",
+    height=350,
+    paper_bgcolor="rgba(15, 20, 25, 0)",
+    plot_bgcolor="rgba(26, 31, 46, 0.5)",
+    font=dict(color="#ffffff", size=12),
+    xaxis=dict(
+        gridcolor="rgba(255, 255, 255, 0.1)",
+        zeroline=False,
+    ),
+    yaxis=dict(
+        gridcolor="rgba(255, 255, 255, 0.1)",
+        zeroline=False,
+        range=[0, 100],  # RSI always ranges from 0 to 100
+    ),
+    legend=dict(
+        bgcolor="rgba(30, 39, 56, 0.8)",
+        bordercolor="#00d4ff",
+        borderwidth=1,
+    ),
+)
+
+st.plotly_chart(rsi_fig, use_container_width=True)
+
+# Display current RSI interpretation
+col1, col2, col3 = st.columns(3)
+
+current_rsi = rsi.iloc[-1]
+
+# Determine RSI status
+if current_rsi > 70:
+    rsi_status = "📈 Overbought"
+    rsi_message = "Price may have risen too fast. Potential pullback or sell signal."
+    rsi_status_color = "#ff6b6b"
+elif current_rsi < 30:
+    rsi_status = "📉 Oversold"
+    rsi_message = "Price may have fallen too much. Potential bounce or buy signal."
+    rsi_status_color = "#51cf66"
+else:
+    rsi_status = "⚖️ Neutral"
+    rsi_message = "Momentum is balanced. No extreme conditions."
+    rsi_status_color = "#ffaa00"
+
+with col1:
+    st.metric("Current RSI", f"{current_rsi:.2f}")
+
+with col2:
+    st.markdown(f"""
+    <div style='
+        background: linear-gradient(135deg, #1e2738, #2a3447);
+        padding: 15px;
+        border-radius: 8px;
+        border-left: 4px solid {rsi_status_color};
+        text-align: center;
+    '>
+        <h4 style='color: {rsi_status_color}; margin: 0;'>{rsi_status}</h4>
+    </div>
+    """, unsafe_allow_html=True)
+
+with col3:
+    st.info(f"💡 {rsi_message}")
+
+# RSI explanation
+with st.expander("ℹ️ What is RSI?"):
+    st.markdown("""
+    **Relative Strength Index (RSI)** is a momentum indicator that measures the strength of price movements.
+    
+    **How it works:**
+    - Compares average gains and losses over 14 periods
+    - Ranges from 0 to 100
+    
+    **Interpretation:**
+    - **Above 70**: Overbought - Price may be too high, potential sell opportunity
+    - **Below 30**: Oversold - Price may be too low, potential buy opportunity
+    - **30-70**: Neutral - Normal price action
+    
+    **Use with Moving Averages:**
+    - RSI confirms trends: Uptrend with RSI > 50 is strong
+    - Divergences: Price makes new high but RSI doesn't = potential reversal
+    - Use RSI with MA crossovers for better signals
+    """)
+
+# ============================================================================
+# STATISTICS TABLE
+# ============================================================================
+st.subheader("📋 Trading Statistics")
+
+stats_data = {
+    "Metric": [
+        "Current Price",
+        "Highest Price (Period)",
+        "Lowest Price (Period)",
+        "Average Price",
+        "5-Day MA",
+        "10-Day MA",
+        "Trading Signal",
+        "Days Analyzed"
+    ],
+    "Value": [
+        f"${close_prices.iloc[-1]:.2f}",
+        f"${close_prices.max():.2f}",
+        f"${close_prices.min():.2f}",
+        f"${close_prices.mean():.2f}",
+        f"${ma5.iloc[-1]:.2f}",
+        f"${ma10.iloc[-1]:.2f}",
+        signal,
+        f"{len(data)} days"
+    ]
+}
+
+stats_df = pd.DataFrame(stats_data)
+st.dataframe(stats_df, use_container_width=True, hide_index=True)
+
+# ============================================================================
+# AI TRADING INSIGHTS
+# ============================================================================
+
+def generate_ai_insights(current_price, ma5_value, ma10_value, rsi_value, signal):
+    """
+    Create simple rule-based market commentary using current indicators.
+    This function returns a beginner-friendly sentiment and two message cards.
+    """
+    price_trend = "bullish" if current_price > ma5_value and ma5_value > ma10_value else "bearish" if current_price < ma5_value and ma5_value < ma10_value else "neutral"
+    rsi_condition = "overbought" if rsi_value > 70 else "oversold" if rsi_value < 30 else "balanced"
+
+    if signal == "BUY" and price_trend == "bullish" and rsi_condition != "overbought":
+        sentiment = "Bullish"
+        summary = "Price is above both moving averages and the chart looks constructive."
+        detail = "Momentum is positive, and RSI is not yet overbought. This suggests strength while the trend holds."
+        color = "#1f7a1f"
+    elif signal == "SELL" and price_trend == "bearish" and rsi_condition != "oversold":
+        sentiment = "Bearish"
+        summary = "Price is below both moving averages and the trend is weak."
+        detail = "Momentum is negative, and RSI is not deeply oversold. Caution is advised on new long positions."
+        color = "#7a1f1f"
+    elif signal == "BUY" and rsi_condition == "overbought":
+        sentiment = "Cautious Bullish"
+        summary = "The uptrend is present but RSI is extended."
+        detail = "A pullback could happen soon, so watch support levels closely."
+        color = "#7a7a1f"
+    elif signal == "SELL" and rsi_condition == "oversold":
+        sentiment = "Cautious Bearish"
+        summary = "The downtrend is visible, but RSI is stretched low."
+        detail = "A short-term bounce may occur before the next move."
+        color = "#7a4f1f"
+    else:
+        sentiment = "Neutral"
+        summary = "The indicators are mixed and the market may be consolidating."
+        detail = "Wait for a clearer setup before taking new action, and use both MAs and RSI for confirmation."
+        color = "#4f4f4f"
+
+    return sentiment, summary, detail, color
+
+
+insight_sentiment, insight_summary, insight_detail, insight_color = generate_ai_insights(
+    current_price,
+    ma5.iloc[-1],
+    ma10.iloc[-1],
+    current_rsi,
+    signal
+)
+
+st.subheader("🤖 AI Trading Insights")
+insight_col1, insight_col2 = st.columns(2)
+
+with insight_col1:
+    st.markdown(f"""
+    <div style='background: linear-gradient(135deg, #131820, #1f2935); padding: 20px; border-radius: 12px; border-left: 5px solid {insight_color};'>
+        <h3 style='color: #ffffff; margin: 0;'>Market Sentiment</h3>
+        <p style='color: {insight_color}; font-size: 22px; margin: 10px 0 0 0;'>{insight_sentiment}</p>
+        <p style='color: #b0b9c1; margin: 10px 0 0 0;'>{insight_summary}</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+with insight_col2:
+    st.markdown(f"""
+    <div style='background: linear-gradient(135deg, #131820, #1f2935); padding: 20px; border-radius: 12px; border-left: 5px solid {insight_color};'>
+        <h3 style='color: #ffffff; margin: 0;'>What the indicators say</h3>
+        <p style='color: #b0b9c1; margin: 12px 0 0 0;'>Signal: <strong>{signal}</strong></p>
+        <p style='color: #b0b9c1; margin: 8px 0 0 0;'>MA5: <strong>${ma5.iloc[-1]:.2f}</strong></p>
+        <p style='color: #b0b9c1; margin: 8px 0 0 0;'>MA10: <strong>${ma10.iloc[-1]:.2f}</strong></p>
+        <p style='color: #b0b9c1; margin: 8px 0 0 0;'>RSI: <strong>{current_rsi:.2f}</strong></p>
+        <p style='color: #ffffff; margin: 16px 0 0 0;'>{insight_detail}</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def rate_news_sentiment(headline):
+    """Assign a basic sentiment label based on headline keywords."""
+    text = headline.lower()
+    bullish_keywords = ["beat", "gain", "upgrade", "buy", "record", "optimistic", "rally", "strong"]
+    bearish_keywords = ["miss", "drop", "downgrade", "sell", "warn", "cut", "weak", "decline"]
+    if any(word in text for word in bullish_keywords):
+        return "Bullish"
+    if any(word in text for word in bearish_keywords):
+        return "Bearish"
+    return "Neutral"
+
+
+def news_sentiment_color(sentiment):
+    if sentiment == "Bullish":
+        return "#51cf66"
+    if sentiment == "Bearish":
+        return "#ff6b6b"
+    return "#ffaa00"
+
+
+def fetch_stock_news(ticker, max_items=5):
+    """Fetch recent news headlines for the selected ticker using yfinance."""
+    try:
+        stock = yf.Ticker(ticker)
+        raw_news = getattr(stock, "news", []) or []
+    except Exception:
+        return []
+
+    news_items = []
+    for item in raw_news[:max_items]:
+        content = item.get("content") or {}
+        headline = content.get("title") or item.get("title") or item.get("headline") or "Headline unavailable"
+        provider = content.get("provider") or {}
+        publisher = (
+            provider.get("displayName")
+            or item.get("publisher")
+            or item.get("providerPublishSource")
+            or "Unknown"
+        )
+        click_url = content.get("clickThroughUrl") or {}
+        canonical_url = content.get("canonicalUrl") or {}
+        link = (
+            click_url.get("url")
+            or canonical_url.get("url")
+            or item.get("link")
+            or item.get("url")
+            or ""
+        )
+        published_date = "Unknown date"
+        pub_date_raw = content.get("pubDate") or content.get("displayTime") or item.get("providerPublishTime")
+        if isinstance(pub_date_raw, int):
+            published_date = datetime.fromtimestamp(pub_date_raw).strftime("%Y-%m-%d %H:%M")
+        elif isinstance(pub_date_raw, str) and pub_date_raw:
+            try:
+                published_date = datetime.fromisoformat(pub_date_raw.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M")
+            except ValueError:
+                published_date = pub_date_raw
+
+        sentiment = rate_news_sentiment(headline)
+        news_items.append({
+            "headline": headline,
+            "publisher": publisher,
+            "published_date": published_date,
+            "sentiment": sentiment,
+            "color": news_sentiment_color(sentiment),
+            "link": link,
+        })
+    return news_items
+
+
+st.subheader("📰 Stock News & Sentiment")
+news_items = fetch_stock_news(ticker)
+
+if news_items:
+    for article in news_items:
+        headline_html = f"<a href='{article['link']}' target='_blank' style='color: #00d4ff; text-decoration: none;'>{article['headline']}</a>" if article['link'] else article['headline']
+        st.markdown(f"""
+        <div style='background: linear-gradient(135deg, #131820, #1f2935); padding: 18px; border-radius: 12px; border-left: 5px solid {article['color']}; margin-bottom: 12px;'>
+            <p style='color: #ffffff; font-weight: bold; margin: 0;'>{headline_html}</p>
+            <p style='color: #b0b9c1; margin: 6px 0 0 0;'>Publisher: {article['publisher']} • {article['published_date']}</p>
+            <p style='color: {article['color']}; margin: 8px 0 0 0; font-weight: bold;'>Sentiment: {article['sentiment']}</p>
+        </div>
+        """, unsafe_allow_html=True)
+else:
+    st.info("📰 No recent news headlines available for this ticker.")
+
+# ============================================================================
+# PORTFOLIO TRACKER SECTION
+# ============================================================================
+st.divider()
+st.title("💼 Portfolio Tracker")
+
+# Initialize session state for portfolio holdings
+if "portfolio" not in st.session_state:
+    st.session_state.portfolio = load_portfolio()
+
+# Portfolio input section in sidebar
+with st.sidebar:
+    st.divider()
+    st.subheader("➕ Add Holdings")
+    
+    # Input fields for new holding
+    col_ticker, col_shares = st.columns(2)
+    
+    with col_ticker:
+        new_ticker = st.text_input(
+            "Ticker Symbol",
+            key="new_ticker",
+            placeholder="e.g., AAPL"
+        ).upper()
+    
+    with col_shares:
+        new_shares = st.number_input(
+            "Shares Owned",
+            key="new_shares",
+            min_value=0.0,
+            step=0.1,
+            value=0.0
+        )
+    
+    new_avg_price = st.number_input(
+        "Average Buy Price ($)",
+        key="new_avg_price",
+        min_value=0.0,
+        step=0.01,
+        value=0.0
+    )
+    
+    # Button to add holding
+    col_add, col_clear = st.columns(2)
+    
+    with col_add:
+        if st.button("➕ Add Holding", use_container_width=True):
+            if new_ticker and new_shares > 0 and new_avg_price > 0:
+                # Check if ticker already exists
+                existing = [h for h in st.session_state.portfolio if h["ticker"] == new_ticker]
+                if existing:
+                    st.warning(f"{new_ticker} already in portfolio!")
+                else:
+                    st.session_state.portfolio.append({
+                        "ticker": new_ticker,
+                        "shares": new_shares,
+                        "avg_price": new_avg_price
+                    })
+                    
+                    save_portfolio(st.session_state.portfolio)
+                    st.success(f"✅ Added {new_ticker}!")
+                    st.rerun()
+            else:
+                st.error("⚠️ Please fill all fields correctly")
+    
+    with col_clear:
+        if st.button("🗑️ Clear All", use_container_width=True):
+            st.session_state.portfolio = []
+            save_portfolio(st.session_state.portfolio)
+            st.rerun()
+
+# Display portfolio section
+if st.session_state.portfolio:
+    
+    # Fetch live data for all holdings
+    portfolio_data = []
+    total_investment = 0
+    total_current_value = 0
+    
+    with st.spinner("📊 Fetching live prices..."):
+        for holding in st.session_state.portfolio:
+            try:
+                ticker_data = yf.Ticker(holding["ticker"])
+                live_price = ticker_data.history(period="1d")["Close"].iloc[-1]
+                
+                # Calculate metrics
+                shares = holding["shares"]
+                avg_price = holding["avg_price"]
+                current_value = shares * live_price
+                investment_cost = shares * avg_price
+                gain_loss = current_value - investment_cost
+                percent_return = (gain_loss / investment_cost) * 100 if investment_cost > 0 else 0
+                
+                # Track totals
+                total_investment += investment_cost
+                total_current_value += current_value
+                
+                portfolio_data.append({
+                    "Ticker": holding["ticker"],
+                    "Shares": shares,
+                    "Avg Buy Price": f"${avg_price:.2f}",
+                    "Current Price": f"${live_price:.2f}",
+                    "Cost Basis": f"${investment_cost:.2f}",
+                    "Current Value": f"${current_value:.2f}",
+                    "Gain/Loss": f"${gain_loss:.2f}",
+                    "Return %": f"{percent_return:.2f}%",
+                    "live_price": live_price,
+                    "gain_loss": gain_loss,
+                    "percent_return": percent_return,
+                    "allocation_value": current_value
+                })
+            
+            except Exception as e:
+                st.error(f"❌ Error fetching {holding['ticker']}: {str(e)}")
+    
+    # Portfolio Summary Cards
+    st.subheader("📈 Portfolio Summary")
+    col1, col2, col3, col4 = st.columns(4)
+    
+    total_gain_loss = total_current_value - total_investment
+    total_percent_return = (total_gain_loss / total_investment) * 100 if total_investment > 0 else 0
+    
+    with col1:
+        st.metric("Total Investment", f"${total_investment:.2f}")
+    
+    with col2:
+        st.metric("Current Value", f"${total_current_value:.2f}")
+    
+    with col3:
+        delta_color = "inverse" if total_gain_loss >= 0 else "normal"
+        st.metric(
+            "Total Gain/Loss",
+            f"${total_gain_loss:.2f}",
+            f"{total_percent_return:.2f}%",
+            delta_color=delta_color
+        )
+    
+    with col4:
+        num_holdings = len(st.session_state.portfolio)
+        st.metric("Holdings", f"{num_holdings}")
+    
+    # Create two columns for portfolio table and pie chart
+    st.divider()
+    chart_col1, chart_col2 = st.columns([1.5, 1])
+    
+    with chart_col1:
+        st.subheader("📊 Holdings Details")
+        
+        # Create DataFrame for display with color coding
+        display_data = []
+        for holding in portfolio_data:
+            display_data.append({
+                "Ticker": holding["Ticker"],
+                "Shares": f"{holding['Shares']:.2f}",
+                "Avg Buy Price": holding["Avg Buy Price"],
+                "Current Price": holding["Current Price"],
+                "Cost Basis": holding["Cost Basis"],
+                "Current Value": holding["Current Value"],
+                "Gain/Loss": holding["Gain/Loss"],
+                "Return %": holding["Return %"]
+            })
+        
+        portfolio_df = pd.DataFrame(display_data)
+        st.dataframe(portfolio_df, use_container_width=True, hide_index=True)
+        
+        # Add details about removing holdings
+        if st.checkbox("Remove a holding?"):
+            remove_ticker = st.selectbox(
+                "Select holding to remove:",
+                options=[h["ticker"] for h in st.session_state.portfolio]
+            )
+            if st.button("🗑️ Remove", use_container_width=True):
+                st.session_state.portfolio = [
+                    h for h in st.session_state.portfolio if h["ticker"] != remove_ticker
+                ]
+                save_portfolio(st.session_state.portfolio)
+                st.success(f"✅ Removed {remove_ticker}!")
+                st.rerun()
+    
+    with chart_col2:
+        st.subheader("💰 Allocation")
+        
+        # Create allocation pie chart
+        if portfolio_data:
+            allocation_fig = go.Figure(data=[go.Pie(
+                labels=[h["Ticker"] for h in portfolio_data],
+                values=[h["allocation_value"] for h in portfolio_data],
+                marker=dict(
+                    colors=["#00d4ff", "#00ff41", "#ff8800", "#ff4444", "#9d4edd", "#3a86ff"],
+                    line=dict(color="#0f1419", width=2)
+                ),
+                hovertemplate="<b>%{label}</b><br>Value: $%{value:.2f}<br>Allocation: %{percent}<extra></extra>"
+            )])
+            
+            allocation_fig.update_layout(
+                template="plotly_dark",
+                height=350,
+                paper_bgcolor="rgba(15, 20, 25, 0)",
+                font=dict(color="#ffffff", size=11),
+                legend=dict(
+                    bgcolor="rgba(30, 39, 56, 0.8)",
+                    bordercolor="#00d4ff",
+                    borderwidth=1,
+                )
+            )
+            
+            st.plotly_chart(allocation_fig, use_container_width=True)
+    
+    # Detailed gain/loss analysis
+    st.divider()
+    st.subheader("🎯 Performance Analysis")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    # Calculate statistics
+    gainers = [h for h in portfolio_data if h["gain_loss"] > 0]
+    losers = [h for h in portfolio_data if h["gain_loss"] < 0]
+    
+    with col1:
+        st.metric(
+            "Best Performer",
+            gainers[0]["Ticker"] if gainers else "N/A",
+            f"{gainers[0]['percent_return']:.2f}%" if gainers else "N/A"
+        )
+    
+    with col2:
+        worst_performer = max(losers, key=lambda x: x["percent_return"]) if losers else None
+        st.metric(
+            "Worst Performer",
+            worst_performer["Ticker"] if worst_performer else "N/A",
+            f"{worst_performer['percent_return']:.2f}%" if worst_performer else "N/A"
+        )
+    
+    with col3:
+        winning_pct = (len(gainers) / len(portfolio_data)) * 100 if portfolio_data else 0
+        st.metric(
+            "Win Rate",
+            f"{winning_pct:.0f}%",
+            f"{len(gainers)} of {len(portfolio_data)}"
+        )
+    
+    # Colored holding cards showing gain/loss
+    st.markdown("**Individual Holdings Performance:**")
+    for holding in portfolio_data:
+        gain_loss = holding["gain_loss"]
+        percent_return = holding["percent_return"]
+        
+        # Color based on gain/loss
+        if gain_loss >= 0:
+            card_color = "#1a3a2a"  # Dark green
+            text_color = "#51cf66"  # Bright green
+            arrow = "📈"
+        else:
+            card_color = "#3a1a1a"  # Dark red
+            text_color = "#ff6b6b"  # Bright red
+            arrow = "📉"
+        
+        st.markdown(f"""
+        <div style='
+            background: {card_color};
+            padding: 12px;
+            border-radius: 8px;
+            border-left: 4px solid {text_color};
+            margin-bottom: 8px;
+        '>
+            <div style='display: flex; justify-content: space-between; align-items: center;'>
+                <div>
+                    <h4 style='color: #ffffff; margin: 0;'>{arrow} {holding["Ticker"]}</h4>
+                    <p style='color: #b0b9c1; margin: 5px 0 0 0;'>{holding["Shares"]} shares @ {holding["Avg Buy Price"]}</p>
+                </div>
+                <div style='text-align: right;'>
+                    <p style='color: {text_color}; font-size: 18px; font-weight: bold; margin: 0;'>${gain_loss:.2f}</p>
+                    <p style='color: {text_color}; margin: 0;'>{percent_return:.2f}%</p>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+else:
+    st.info("📝 No holdings yet. Add your first stock in the sidebar to get started!")
+
+# Footer
+st.divider()
+st.markdown(
+    "⚠️ **Disclaimer:** This dashboard is for educational purposes only. "
+    "Not financial advice. Always conduct your own research before trading."
+)

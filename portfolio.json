@@ -1,0 +1,17 @@
+[
+    {
+        "ticker": "NVDA",
+        "shares": 5.0,
+        "avg_price": 200.0
+    },
+    {
+        "ticker": "SPY",
+        "shares": 2.0,
+        "avg_price": 500.0
+    },
+    {
+        "ticker": "AAPL",
+        "shares": 3.0,
+        "avg_price": 180.0
+    }
+]
