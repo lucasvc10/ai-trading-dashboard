@@ -376,6 +376,173 @@ for i in range(0, len(movers_sorted), cols_per_row):
                     """ % (color, tkr, price, color, sign, pct), unsafe_allow_html=True)
 
 
+# ============================================================================
+# TRADE ALERTS
+# ============================================================================
+# Simple rule-based alerts for the selected ticker. Shows technical warnings
+# and opportunities based on RSI, moving averages, and volatility.
+# No AI analysis; just beginner-friendly trading indicators.
+# ============================================================================
+st.subheader("🚨 Trade Alerts")
+
+# Function to generate alerts based on simple technical rules
+def generate_trade_alerts(ticker):
+    """
+    Generate simple trading alerts for the selected ticker.
+    Returns a list of alert dictionaries with: message, type (bullish/bearish/caution), explanation
+    Safe to call; handles missing data gracefully.
+    """
+    alerts = []
+    
+    try:
+        # Fetch recent data (5 days to calculate volatility)
+        hist_data = yf.Ticker(ticker).history(period="5d")
+        
+        if hist_data.empty or len(hist_data) < 2:
+            # Not enough data; return empty alerts gracefully
+            return alerts
+        
+        close_prices = hist_data["Close"]
+        
+        # Get current and previous close
+        current_price = close_prices.iloc[-1]
+        previous_close = close_prices.iloc[-2]
+        
+        # Calculate daily percentage change
+        daily_change = ((current_price - previous_close) / previous_close) * 100
+        
+        # ===== VOLATILITY ALERT =====
+        if abs(daily_change) > 3:
+            alert_type = "caution"  # Yellow/orange for high volatility
+            symbol = "⚡"
+            if daily_change > 3:
+                message = f"High Volatility: Up {daily_change:.2f}% - Price moving fast"
+            else:
+                message = f"High Volatility: Down {abs(daily_change):.2f}% - Price moving fast"
+            explanation = "Large daily moves can indicate increased risk or opportunity. Stay alert to market news."
+            alerts.append({
+                "message": message,
+                "type": alert_type,
+                "symbol": symbol,
+                "explanation": explanation
+            })
+        
+        # Calculate RSI (14-period)
+        price_changes = close_prices.diff()
+        gains = price_changes.clip(lower=0)
+        losses = -price_changes.clip(upper=0)
+        avg_gains = gains.rolling(window=14).mean()
+        avg_losses = losses.rolling(window=14).mean()
+        rs = avg_gains / avg_losses
+        rsi = 100 - (100 / (1 + rs))
+        current_rsi = rsi.iloc[-1]
+        
+        # ===== RSI ALERTS =====
+        if current_rsi > 70:
+            alert_type = "bearish"
+            symbol = "📈"
+            message = f"Overbought Alert: RSI = {current_rsi:.2f}"
+            explanation = "RSI above 70 suggests the stock may have risen too quickly. Watch for potential pullback or profit-taking."
+            alerts.append({
+                "message": message,
+                "type": alert_type,
+                "symbol": symbol,
+                "explanation": explanation
+            })
+        elif current_rsi < 30:
+            alert_type = "bullish"
+            symbol = "📉"
+            message = f"Oversold Opportunity: RSI = {current_rsi:.2f}"
+            explanation = "RSI below 30 suggests the stock may have fallen too far. This could be a buying opportunity if the trend reverses."
+            alerts.append({
+                "message": message,
+                "type": alert_type,
+                "symbol": symbol,
+                "explanation": explanation
+            })
+        
+        # Calculate moving averages for trend signals
+        ma5 = close_prices.rolling(window=5).mean()
+        ma10 = close_prices.rolling(window=10).mean()
+        
+        if len(ma5) >= 5 and len(ma10) >= 10:
+            current_ma5 = ma5.iloc[-1]
+            current_ma10 = ma10.iloc[-1]
+            
+            # ===== TREND ALERTS =====
+            if current_price > current_ma5 and current_ma5 > current_ma10:
+                alert_type = "bullish"
+                symbol = "🟢"
+                message = "Bullish Trend: Price above both moving averages"
+                explanation = "Price is trading above both 5-day and 10-day MAs. This is a bullish setup for potential continued upside."
+                alerts.append({
+                    "message": message,
+                    "type": alert_type,
+                    "symbol": symbol,
+                    "explanation": explanation
+                })
+            elif current_price < current_ma5 and current_ma5 < current_ma10:
+                alert_type = "bearish"
+                symbol = "🔴"
+                message = "Bearish Trend: Price below both moving averages"
+                explanation = "Price is trading below both 5-day and 10-day MAs. This is a bearish setup; caution advised on new long positions."
+                alerts.append({
+                    "message": message,
+                    "type": alert_type,
+                    "symbol": symbol,
+                    "explanation": explanation
+                })
+    
+    except Exception as e:
+        # If data fetch fails, return empty list; don't crash the dashboard
+        pass
+    
+    return alerts
+
+# Generate alerts for the selected ticker
+trade_alerts = generate_trade_alerts(ticker)
+
+# Display alerts in colored cards
+if trade_alerts:
+    alert_cols = st.columns(1)
+    
+    for alert in trade_alerts:
+        # Color scheme: green for bullish, red for bearish, yellow/orange for caution
+        if alert["type"] == "bullish":
+            bg_color = "#0d3a1a"  # Dark green
+            border_color = "#51cf66"  # Bright green
+            text_color = "#51cf66"
+        elif alert["type"] == "bearish":
+            bg_color = "#3a0d0d"  # Dark red
+            border_color = "#ff6b6b"  # Bright red
+            text_color = "#ff6b6b"
+        else:  # caution
+            bg_color = "#3a2a0d"  # Dark orange/yellow
+            border_color = "#ffaa00"  # Orange/yellow
+            text_color = "#ffaa00"
+        
+        # Display alert card
+        st.markdown(f"""
+        <div style='
+            background: {bg_color};
+            padding: 16px;
+            border-radius: 10px;
+            border-left: 5px solid {border_color};
+            margin-bottom: 12px;
+        '>
+            <div style='display: flex; align-items: flex-start; gap: 12px;'>
+                <div style='font-size: 24px; margin-top: -2px;'>{alert["symbol"]}</div>
+                <div style='flex: 1;'>
+                    <p style='color: {text_color}; font-weight: bold; margin: 0; font-size: 16px;'>{alert["message"]}</p>
+                    <p style='color: #b0b9c1; margin: 8px 0 0 0; font-size: 14px;'>{alert["explanation"]}</p>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+else:
+    st.info(f"ℹ️ No major alerts for {ticker} at this time. Market conditions appear neutral.")
+
+
 # Fetch data
 try:
     with st.spinner(f"📥 Fetching data for {ticker}..."):
@@ -1318,9 +1485,117 @@ with st.form("trade_form", clear_on_submit=True):
         else:
             st.error("⚠️ Ticker and Entry Price are required")
 
+# ============================================================================
+# JOURNAL SUMMARY METRICS
+# ============================================================================
+# Calculate performance summary from saved trades for quick insights.
+# This helps traders see patterns without AI analysis yet.
+
+def calculate_journal_summary(journal_entries):
+    """
+    Analyze saved trades and return summary metrics.
+    Safe to call with empty journal; returns default values.
+    """
+    if not journal_entries:
+        return None
+    
+    closed_trades = [t for t in journal_entries if t.get('exit_price') and t['exit_price'] > 0]
+    
+    if not closed_trades:
+        # No closed trades yet; only show total count
+        return {
+            "total_trades": len(journal_entries),
+            "closed_trades": 0,
+            "total_pnl": None,
+            "win_rate": None,
+            "avg_confidence": sum(t['confidence'] for t in journal_entries) / len(journal_entries),
+            "best_setup": None
+        }
+    
+    # Calculate metrics for closed trades only
+    total_pnl = sum(t['pnl'] for t in closed_trades if t['pnl'] is not None)
+    
+    # Win rate: trades with positive P&L / total closed trades
+    winning_trades = len([t for t in closed_trades if t.get('pnl', 0) > 0])
+    win_rate = (winning_trades / len(closed_trades)) * 100
+    
+    # Average confidence across all trades
+    avg_confidence = sum(t['confidence'] for t in journal_entries) / len(journal_entries)
+    
+    # Best setup type (most frequent, excluding empty)
+    setups = [t['setup_type'] for t in journal_entries if t.get('setup_type', '').strip()]
+    best_setup = max(set(setups), key=setups.count) if setups else None
+    
+    return {
+        "total_trades": len(journal_entries),
+        "closed_trades": len(closed_trades),
+        "total_pnl": total_pnl,
+        "win_rate": win_rate,
+        "avg_confidence": avg_confidence,
+        "best_setup": best_setup
+    }
+
 # Display saved trades
 st.subheader("Saved Trades")
 if st.session_state.journal:
+    # Show performance summary if trades exist
+    summary = calculate_journal_summary(st.session_state.journal)
+    
+    if summary:
+        st.subheader("🎯 Journal Performance Summary")
+        
+        # Create summary cards in a responsive grid
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric(
+                "Total Trades",
+                summary["total_trades"],
+                help="Total number of trades logged"
+            )
+        
+        with col2:
+            st.metric(
+                "Closed Trades",
+                summary["closed_trades"],
+                help="Trades with exit price (for P&L calculation)"
+            )
+        
+        with col3:
+            pnl_display = f"${summary['total_pnl']:.2f}" if summary["total_pnl"] is not None else "N/A"
+            pnl_color = "off" if summary["total_pnl"] is None or summary["total_pnl"] >= 0 else "inverse"
+            st.metric(
+                "Total P&L",
+                pnl_display,
+                delta_color=pnl_color if summary["total_pnl"] is not None else "off",
+                help="Cumulative profit/loss from closed trades"
+            )
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            win_rate_display = f"{summary['win_rate']:.1f}%" if summary["win_rate"] is not None else "N/A"
+            st.metric(
+                "Win Rate",
+                win_rate_display,
+                help="Percentage of closed trades with positive P&L"
+            )
+        
+        with col2:
+            st.metric(
+                "Avg Confidence",
+                f"{summary['avg_confidence']:.1f}/10",
+                help="Average confidence level across all trades"
+            )
+        
+        with col3:
+            setup_display = summary["best_setup"] if summary["best_setup"] else "N/A"
+            st.metric(
+                "Best Setup",
+                setup_display,
+                help="Most frequently used setup type"
+            )
+    
     # Convert journal to display-friendly DataFrame
     display_trades = []
     for trade in st.session_state.journal:
