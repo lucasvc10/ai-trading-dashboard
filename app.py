@@ -18,6 +18,7 @@ import os
 STORAGE_DIR = os.path.join(os.path.dirname(__file__), "storage")
 PORTFOLIO_FILE = os.path.join(STORAGE_DIR, "portfolio.json")
 WATCHLIST_FILE = os.path.join(STORAGE_DIR, "watchlist.json")
+JOURNAL_FILE = os.path.join(STORAGE_DIR, "journal.json")
 
 def load_portfolio():
     # Ensure the portfolio file exists before trying to read it.
@@ -60,6 +61,25 @@ def save_watchlist(watchlist):
     # Write the watchlist to disk so it persists across app restarts.
     with open(WATCHLIST_FILE, "w") as file:
         json.dump(watchlist, file, indent=4)
+
+
+def load_journal():
+    # Load trade journal entries. Create empty if missing.
+    if not os.path.exists(JOURNAL_FILE):
+        save_journal([])
+        return []
+    try:
+        with open(JOURNAL_FILE, "r") as file:
+            return json.load(file)
+    except (json.JSONDecodeError, FileNotFoundError):
+        save_journal([])
+        return []
+
+
+def save_journal(journal):
+    # Write journal entries to disk so trades persist across app restarts.
+    with open(JOURNAL_FILE, "w") as file:
+        json.dump(journal, file, indent=4)
 
 # ============================================================================
 # PAGE CONFIGURATION
@@ -218,6 +238,29 @@ st.markdown(
 # Uses yfinance; errors are handled so the dashboard won't crash if a ticker fails.
 # This is intentionally small and non-invasive so existing app logic stays intact.
 # ============================================================================
+
+# Performance optimizations: cached data fetchers to reduce API calls.
+@st.cache_data(ttl=60)
+def fetch_stock_history(ticker, period):
+    """Fetch historical stock data. Cached for 60 seconds to improve performance."""
+    try:
+        stock = yf.Ticker(ticker)
+        data = stock.history(period=period)
+        return data
+    except Exception as e:
+        raise e
+
+@st.cache_data(ttl=60)
+def fetch_live_stock_price(ticker):
+    """Fetch current live price for a single ticker. Cached for 60 seconds."""
+    try:
+        hist = yf.Ticker(ticker).history(period="1d")
+        if hist.empty:
+            return None
+        return float(hist["Close"].iloc[-1])
+    except Exception:
+        return None
+
 st.subheader("🌎 Market Overview")
 
 # Instruments to show: (display name, yfinance ticker)
@@ -231,8 +274,11 @@ MARKET_INSTRUMENTS = [
     ("Natural Gas", "NG=F"),
 ]
 
+@st.cache_data(ttl=60)
 def fetch_instrument_summary(ticker):
-    """Return (price, pct_change) or (None, None) on failure."""
+    """Return (price, pct_change) or (None, None) on failure.
+    Cached for 60 seconds to reduce API calls and improve dashboard speed.
+    """
     try:
         hist = yf.Ticker(ticker).history(period="2d")
         if hist.empty:
@@ -274,8 +320,11 @@ st.subheader("🔥 Top Movers Scanner")
 # Example tickers to scan
 MOVERS_TICKERS = ["NVDA", "TSLA", "META", "AMD", "PLTR", "AAPL", "MSFT", "AMZN"]
 
+@st.cache_data(ttl=60)
 def fetch_stock_change(ticker):
-    """Return (price, pct_change) or (None, None) on failure."""
+    """Return (price, pct_change) or (None, None) on failure.
+    Cached for 60 seconds to reduce API calls and improve scanner speed.
+    """
     try:
         hist = yf.Ticker(ticker).history(period="2d")
         if hist.empty:
@@ -330,8 +379,8 @@ for i in range(0, len(movers_sorted), cols_per_row):
 # Fetch data
 try:
     with st.spinner(f"📥 Fetching data for {ticker}..."):
-        stock = yf.Ticker(ticker)
-        data = stock.history(period=period)
+        # Use cached function to reduce API calls and improve performance
+        data = fetch_stock_history(ticker, period)
         
         if data.empty:
             st.error(f"❌ No data found for ticker: {ticker}")
@@ -508,6 +557,7 @@ st.subheader("📊 RSI (Relative Strength Index) Indicator")
 # Function to calculate RSI (Relative Strength Index)
 # RSI measures momentum by comparing upward and downward price movements
 # Range: 0-100 | Above 70 = Overbought (may sell) | Below 30 = Oversold (may buy)
+@st.cache_data(ttl=60)
 def calculate_rsi(prices, period=14):
     """
     Calculate Relative Strength Index (RSI)
@@ -696,6 +746,7 @@ st.dataframe(stats_df, use_container_width=True, hide_index=True)
 # AI TRADING INSIGHTS
 # ============================================================================
 
+@st.cache_data(ttl=60)
 def generate_ai_insights(current_price, ma5_value, ma10_value, rsi_value, signal):
     """
     Create simple rule-based market commentary using current indicators.
@@ -786,8 +837,11 @@ def news_sentiment_color(sentiment):
     return "#ffaa00"
 
 
+@st.cache_data(ttl=60)
 def fetch_stock_news(ticker, max_items=5):
-    """Fetch recent news headlines for the selected ticker using yfinance."""
+    """Fetch recent news headlines for the selected ticker using yfinance.
+    Cached for 60 seconds to reduce API load.
+    """
     try:
         stock = yf.Ticker(ticker)
         raw_news = getattr(stock, "news", []) or []
@@ -934,8 +988,12 @@ if st.session_state.portfolio:
     with st.spinner("📊 Fetching live prices..."):
         for holding in st.session_state.portfolio:
             try:
-                ticker_data = yf.Ticker(holding["ticker"])
-                live_price = ticker_data.history(period="1d")["Close"].iloc[-1]
+                # Use cached function to reduce API calls for portfolio prices
+                live_price = fetch_live_stock_price(holding["ticker"])
+                
+                if live_price is None:
+                    st.error(f"❌ Could not fetch price for {holding['ticker']}")
+                    continue
                 
                 # Calculate metrics
                 shares = holding["shares"]
@@ -1132,6 +1190,166 @@ if st.session_state.portfolio:
 
 else:
     st.info("📝 No holdings yet. Add your first stock in the sidebar to get started!")
+
+# ============================================================================
+# TRADE JOURNAL
+# ============================================================================
+# Simple trade logging tool for home traders to record trades and later
+# analyze patterns. Each trade is appended to storage/journal.json.
+# This is a basic starter; no AI analysis yet, just data collection.
+# ============================================================================
+st.divider()
+st.title("📝 Trade Journal")
+
+# Initialize or load journal
+if "journal" not in st.session_state:
+    st.session_state.journal = load_journal()
+
+# Form to log a new trade
+st.subheader("Log a Trade")
+with st.form("trade_form", clear_on_submit=True):
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        journal_ticker = st.text_input(
+            "Ticker Symbol",
+            placeholder="e.g., AAPL",
+            help="Stock or asset ticker"
+        ).upper()
+    
+    with col2:
+        trade_type = st.selectbox(
+            "Trade Type",
+            options=["Stock", "Call Option", "Put Option", "Futures"],
+            help="What instrument are you trading?"
+        )
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        direction = st.selectbox(
+            "Direction",
+            options=["Long", "Short"],
+            help="Are you going long or short?"
+        )
+    
+    with col2:
+        entry_price = st.number_input(
+            "Entry Price ($)",
+            min_value=0.0,
+            step=0.01,
+            help="Price you entered at"
+        )
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        exit_price = st.number_input(
+            "Exit Price ($) - Optional",
+            min_value=0.0,
+            step=0.01,
+            value=0.0,
+            help="Leave 0 if trade is still open"
+        )
+    
+    with col2:
+        position_size = st.number_input(
+            "Position Size",
+            min_value=0.0,
+            step=0.1,
+            help="Shares, contracts, or units"
+        )
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        setup_type = st.text_input(
+            "Setup Type",
+            placeholder="e.g., Breakout, Pullback, RSI Oversold",
+            help="What triggered this trade?"
+        )
+    
+    with col2:
+        confidence = st.slider(
+            "Confidence (1-10)",
+            min_value=1,
+            max_value=10,
+            value=5,
+            help="How confident were you in this trade?"
+        )
+    
+    notes = st.text_area(
+        "Notes",
+        placeholder="Any additional observations or context...",
+        height=80,
+        help="Keep it brief for patterns"
+    )
+    
+    submitted = st.form_submit_button("Save Trade", use_container_width=True)
+    
+    if submitted:
+        if journal_ticker and entry_price > 0:
+            # Calculate P&L if exit price is provided
+            pnl = None
+            if exit_price > 0:
+                if direction == "Long":
+                    pnl = (exit_price - entry_price) * position_size
+                else:  # Short
+                    pnl = (entry_price - exit_price) * position_size
+            
+            new_trade = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "ticker": journal_ticker,
+                "trade_type": trade_type,
+                "direction": direction,
+                "entry_price": entry_price,
+                "exit_price": exit_price if exit_price > 0 else None,
+                "position_size": position_size,
+                "setup_type": setup_type,
+                "confidence": confidence,
+                "notes": notes,
+                "pnl": pnl
+            }
+            
+            st.session_state.journal.append(new_trade)
+            save_journal(st.session_state.journal)
+            st.success(f"✅ Trade logged: {journal_ticker} {direction} @ ${entry_price}")
+            st.rerun()
+        else:
+            st.error("⚠️ Ticker and Entry Price are required")
+
+# Display saved trades
+st.subheader("Saved Trades")
+if st.session_state.journal:
+    # Convert journal to display-friendly DataFrame
+    display_trades = []
+    for trade in st.session_state.journal:
+        pnl_str = f"${trade['pnl']:.2f}" if trade['pnl'] is not None else "Open"
+        display_trades.append({
+            "Date": trade["timestamp"],
+            "Ticker": trade["ticker"],
+            "Type": trade["trade_type"],
+            "Dir": trade["direction"],
+            "Entry": f"${trade['entry_price']:.2f}",
+            "Exit": f"${trade['exit_price']:.2f}" if trade['exit_price'] else "Open",
+            "Size": trade["position_size"],
+            "Setup": trade["setup_type"],
+            "Conf": trade["confidence"],
+            "P&L": pnl_str,
+        })
+    
+    trades_df = pd.DataFrame(display_trades)
+    st.dataframe(trades_df, use_container_width=True, hide_index=True)
+    
+    # Option to clear entire journal
+    if st.checkbox("Clear all trades?"):
+        if st.button("🗑️ Delete Journal", use_container_width=True):
+            st.session_state.journal = []
+            save_journal(st.session_state.journal)
+            st.success("✅ Journal cleared!")
+            st.rerun()
+else:
+    st.info("📝 No trades logged yet. Use the form above to log your first trade.")
 
 # Footer
 st.divider()
