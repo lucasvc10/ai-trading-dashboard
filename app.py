@@ -7,8 +7,17 @@ from datetime import datetime, timedelta
 import json
 import os
 
-PORTFOLIO_FILE = "portfolio.json"
-WATCHLIST_FILE = "watchlist.json"
+### Beginner-friendly project structure
+### The dashboard app stores persistent data in the storage folder.
+### This keeps raw JSON storage separate from the main app code.
+### Project structure note for beginners:
+### - apps and logic stay in app.py for now
+### - `storage/` keeps persistent JSON files like portfolio and watchlist
+### - `agents/`, `data/`, `ui/`, and `utils/` are created for future organization
+
+STORAGE_DIR = os.path.join(os.path.dirname(__file__), "storage")
+PORTFOLIO_FILE = os.path.join(STORAGE_DIR, "portfolio.json")
+WATCHLIST_FILE = os.path.join(STORAGE_DIR, "watchlist.json")
 
 def load_portfolio():
     # Ensure the portfolio file exists before trying to read it.
