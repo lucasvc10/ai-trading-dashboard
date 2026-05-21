@@ -210,6 +210,123 @@ st.markdown(
     f"Real-time stock analysis powered by yfinance | Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 )
 
+# ============================================================================
+# MARKET OVERVIEW
+# ----------------------------------------------------------------------------
+# A compact market overview for active traders. Shows common market instruments
+# (equities, volatility index, commodities) with current price and daily % change.
+# Uses yfinance; errors are handled so the dashboard won't crash if a ticker fails.
+# This is intentionally small and non-invasive so existing app logic stays intact.
+# ============================================================================
+st.subheader("🌎 Market Overview")
+
+# Instruments to show: (display name, yfinance ticker)
+MARKET_INSTRUMENTS = [
+    ("S&P 500", "SPY"),
+    ("Nasdaq 100", "QQQ"),
+    ("Dow Jones", "DIA"),
+    ("VIX", "^VIX"),
+    ("Gold", "GC=F"),
+    ("Crude Oil", "CL=F"),
+    ("Natural Gas", "NG=F"),
+]
+
+def fetch_instrument_summary(ticker):
+    """Return (price, pct_change) or (None, None) on failure."""
+    try:
+        hist = yf.Ticker(ticker).history(period="2d")
+        if hist.empty:
+            return None, None
+        last = hist["Close"].iloc[-1]
+        prev = hist["Close"].iloc[-2] if len(hist) > 1 else last
+        pct = ((last - prev) / prev) * 100 if prev != 0 else 0
+        return float(last), float(pct)
+    except Exception:
+        return None, None
+
+# Display cards in a single responsive row. Each column is one instrument.
+try:
+    cols = st.columns(len(MARKET_INSTRUMENTS))
+    for (name, ticker), col in zip(MARKET_INSTRUMENTS, cols):
+        with col:
+            price, pct = fetch_instrument_summary(ticker)
+            if price is None:
+                # Show a graceful placeholder if data is missing
+                st.markdown(f"<div style='background: linear-gradient(135deg, #131820, #1f2935); padding: 12px; border-radius: 8px; text-align:center;'>\n  <div style='color: #b0b9c1; font-size:12px;'>{name} • {ticker}</div>\n  <div style='color: #ffffff; font-size:16px; font-weight:bold;'>N/A</div>\n  <div style='color: #ffaa00;'>Data unavailable</div>\n</div>", unsafe_allow_html=True)
+            else:
+                color = "#51cf66" if pct >= 0 else "#ff6b6b"
+                sign = "+" if pct >= 0 else ""
+                st.markdown(f"<div style='background: linear-gradient(135deg, #131820, #1f2935); padding: 12px; border-radius: 8px; border-left: 4px solid {color}; text-align:center;'>\n  <div style='color: #b0b9c1; font-size:12px;'>{name} • {ticker}</div>\n  <div style='color: #ffffff; font-size:18px; font-weight:bold;'>${price:.2f}</div>\n  <div style='color: {color}; font-weight:bold;'>{sign}{pct:.2f}%</div>\n</div>", unsafe_allow_html=True)
+except Exception as e:
+    # Non-fatal: show a simple warning but keep the app running
+    st.warning(f"Market overview currently unavailable: {str(e)}")
+
+# ============================================================================
+# TOP MOVERS SCANNER
+# ----------------------------------------------------------------------------
+# Compact, beginner-friendly scanner showing today's biggest movers for a
+# short list of popular tickers. Fetches last-close and previous-close via
+# yfinance and sorts by daily % change (largest gain → largest loss).
+# Errors are handled per-ticker so the app stays stable.
+# ============================================================================
+st.subheader("🔥 Top Movers Scanner")
+
+# Example tickers to scan
+MOVERS_TICKERS = ["NVDA", "TSLA", "META", "AMD", "PLTR", "AAPL", "MSFT", "AMZN"]
+
+def fetch_stock_change(ticker):
+    """Return (price, pct_change) or (None, None) on failure."""
+    try:
+        hist = yf.Ticker(ticker).history(period="2d")
+        if hist.empty:
+            return None, None
+        last = hist["Close"].iloc[-1]
+        prev = hist["Close"].iloc[-2] if len(hist) > 1 else last
+        pct = ((last - prev) / prev) * 100 if prev != 0 else 0
+        return float(last), float(pct)
+    except Exception:
+        return None, None
+
+# Gather data for all tickers (failures yield None values but won't crash)
+movers = []
+for t in MOVERS_TICKERS:
+    price, pct = fetch_stock_change(t)
+    movers.append((t, price, pct))
+
+# Sort by pct change descending (biggest gain → biggest loss). Place missing
+# data at the bottom.
+movers_sorted = sorted(movers, key=lambda x: (x[2] is not None, x[2] if x[2] is not None else -1e9), reverse=True)
+
+# Display in compact rows of 4 columns each for a professional look
+cols_per_row = 4
+for i in range(0, len(movers_sorted), cols_per_row):
+    row = movers_sorted[i:i+cols_per_row]
+    cols = st.columns(cols_per_row)
+    for col, item in zip(cols, row):
+        tkr, price, pct = item
+        with col:
+            if price is None:
+                st.markdown(
+                    """
+                    <div style='background: linear-gradient(135deg, #131820, #1f2935); padding: 12px; border-radius: 8px; text-align:center;'>
+                        <div style='color: #b0b9c1; font-size:12px;'>{}</div>
+                        <div style='color: #ffffff; font-size:16px; font-weight:bold;'>N/A</div>
+                        <div style='color: #ffaa00;'>Data unavailable</div>
+                    </div>
+                    """.format(tkr), unsafe_allow_html=True)
+            else:
+                color = "#51cf66" if pct >= 0 else "#ff6b6b"
+                sign = "+" if pct >= 0 else ""
+                st.markdown(
+                    """
+                    <div style='background: linear-gradient(135deg, #131820, #1f2935); padding: 12px; border-radius: 8px; border-left: 4px solid %s; text-align:center;'>
+                        <div style='color: #b0b9c1; font-size:12px;'>%s</div>
+                        <div style='color: #ffffff; font-size:16px; font-weight:bold;'>$%.2f</div>
+                        <div style='color: %s; font-weight:bold;'>%s%.2f%%</div>
+                    </div>
+                    """ % (color, tkr, price, color, sign, pct), unsafe_allow_html=True)
+
+
 # Fetch data
 try:
     with st.spinner(f"📥 Fetching data for {ticker}..."):
